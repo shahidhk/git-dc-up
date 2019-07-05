@@ -1,17 +1,24 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 var (
 	gitRepoDir    = mustGetenv("GIT_REPO_DIR", "/repo")
 	webhookSecret = mustGetenv("WEBHOOK_SECRET")
 	dcExtraFlags  = mustGetenv("DC_EXTRA_FLAGS", "")
+	isGithub      = mustGetenv("IS_GITHUB", "1")
 )
 
 func index() http.Handler {
@@ -22,10 +29,16 @@ func index() http.Handler {
 			http.Error(w, makeResponse(true, http.StatusText(http.StatusNotFound)), http.StatusNotFound)
 			return
 		}
-		if r.Header.Get("x-webhook-secret") != webhookSecret {
+		if (isGithub == "1" && !isValidSignature(r, webhookSecret)) || (isGithub == "0" && r.Header.Get("x-webhook-secret") != webhookSecret) {
 			http.Error(w, makeResponse(true, http.StatusText(http.StatusUnauthorized)), http.StatusUnauthorized)
 			return
 		}
+
+		// if !isValidSignature(r, webhookSecret) {
+		// 	fmt.Println("signature invalid")
+		// 	http.Error(w, makeResponse(true, http.StatusText(http.StatusUnauthorized)), http.StatusUnauthorized)
+		// 	return
+		// }
 
 		err := executeAction()
 		if err != nil {
@@ -68,4 +81,29 @@ func mustGetenv(key string, def ...string) string {
 	}
 	panic(fmt.Errorf("%s env not set", key))
 	return ""
+}
+
+func isValidSignature(r *http.Request, key string) bool {
+	// Assuming a non-empty header
+	gotHash := strings.SplitN(r.Header.Get("X-Hub-Signature"), "=", 2)
+	if gotHash[0] != "sha1" {
+		return false
+	}
+	defer r.Body.Close()
+
+	b, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Cannot read the request body: %s\n", err)
+		return false
+	}
+
+	hash := hmac.New(sha1.New, []byte(key))
+	if _, err := hash.Write(b); err != nil {
+		log.Printf("Cannot compute the HMAC for request: %s\n", err)
+		return false
+	}
+
+	expectedHash := hex.EncodeToString(hash.Sum(nil))
+	log.Println("EXPECTED HASH:", expectedHash)
+	return gotHash[1] == expectedHash
 }
